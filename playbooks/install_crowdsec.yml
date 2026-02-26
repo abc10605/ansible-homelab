@@ -1,0 +1,78 @@
+---
+- name: Install and Configure CrowdSec
+  hosts: "{{ target | default('all') }}"
+  become: true
+  vars:
+    # 是否安裝防火牆阻擋器 (建議開啟，否則只會檢測不會阻擋)
+    crowdsec_install_bouncer: true
+    crowdsec_bouncer_package: "crowdsec-firewall-bouncer-iptables"
+
+  tasks:
+    # -------------------------------------------------------
+    # 1. Repository Setup (確保冪等性)
+    # -------------------------------------------------------
+    - name: Check if CrowdSec repository exists (Debian/Ubuntu)
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/crowdsec_crowdsec.list
+      register: debian_repo_check
+      when: ansible_os_family == "Debian"
+
+    - name: Check if CrowdSec repository exists (RHEL/CentOS)
+      ansible.builtin.stat:
+        path: /etc/yum.repos.d/crowdsec_crowdsec.repo
+      register: rhel_repo_check
+      when: ansible_os_family == "RedHat"
+
+    - name: Download and configure CrowdSec Repository
+      ansible.builtin.shell:
+        cmd: "curl -s https://install.crowdsec.net | sudo bash"
+      # 只有在 Repo 檔案不存在時才執行，確保冪等性
+      when:
+        - (ansible_os_family == "Debian" and not debian_repo_check.stat.exists) or
+          (ansible_os_family == "RedHat" and not rhel_repo_check.stat.exists)
+      changed_when: true
+
+    # -------------------------------------------------------
+    # 2. Package Installation
+    # -------------------------------------------------------
+    - name: Install CrowdSec Agent
+      ansible.builtin.package:
+        name: crowdsec
+        state: present
+        update_cache: true
+
+    - name: Install CrowdSec Firewall Bouncer
+      ansible.builtin.package:
+        name: "{{ crowdsec_bouncer_package }}"
+        state: present
+      when: crowdsec_install_bouncer
+
+    # -------------------------------------------------------
+    # 3. Service Management
+    # -------------------------------------------------------
+    - name: Ensure CrowdSec service is enabled and running
+      ansible.builtin.service:
+        name: crowdsec
+        state: started
+        enabled: true
+
+    # - name: Ensure Firewall Bouncer service is enabled and running
+    #   ansible.builtin.service:
+    #     name: "{{ crowdsec_bouncer_package }}"
+    #     state: started
+    #     enabled: true
+    #   when: crowdsec_install_bouncer
+
+    # -------------------------------------------------------
+    # 4. Post-Install Verification (Optional)
+    # -------------------------------------------------------
+    - name: Verify CrowdSec installation
+      ansible.builtin.command:
+        cmd: cscli metrics
+      register: cscli_output
+      changed_when: false
+      failed_when: false
+
+    - name: Display CrowdSec Status
+      ansible.builtin.debug:
+        msg: "CrowdSec is running. Metrics output: {{ cscli_output.stdout_lines[0] if cscli_output.stdout_lines else 'No metrics yet' }}"

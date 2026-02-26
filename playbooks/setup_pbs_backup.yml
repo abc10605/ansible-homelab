@@ -1,0 +1,262 @@
+---
+- name: Setup Proxmox Backup with 1Password CLI (Multi-Arch)
+  hosts: raspberry_pi
+  become: true
+  vars:
+    op_connect_token: "{{ vault_op_connect_token }}"
+    
+    # PBS 設定
+    pbs_repo: "root@pam@pbs.server.zaidho.me:main-backup"
+    pbs_password_ref: "op://Connect Server/Proxmox Backup Server/password"
+    pbs_fingerprint_ref: "op://Connect Server/Proxmox Backup Server/main-backup fingerprint"
+    pbs_client_version: "v4.0.12"
+    
+    backup_script_path: "/usr/local/bin/daily-pbs-backup.sh"
+
+  tasks:
+    # =======================================================
+    # 1. Pre-check: Verify Existing Installations
+    # =======================================================
+    - name: Check for existing binaries
+      block:
+        # 檢查 1Password CLI
+        - name: Check if 1Password CLI (op) is installed
+          ansible.builtin.command: op --version
+          register: op_check
+          changed_when: false
+          failed_when: false
+
+        # 檢查 Proxmox Backup Client
+        - name: Check if Proxmox Backup Client is installed
+          ansible.builtin.command: proxmox-backup-client version
+          register: pbs_check
+          changed_when: false
+          failed_when: false
+
+        # (選擇性) 顯示檢查結果
+        - name: Display check results
+          ansible.builtin.debug:
+            msg: 
+              - "1Password CLI Found: {{ op_check.rc == 0 }}"
+              - "PBS Client Found: {{ pbs_check.rc == 0 }}"
+
+    # =======================================================
+    # 2. Install 1Password CLI (通用)
+    # =======================================================
+    - name: Install 1Password CLI
+      block:
+        - name: Install prerequisites for 1Password
+          ansible.builtin.package:
+            name:
+              - curl
+              - gnupg
+              - apt-transport-https
+              - debsig-verify  # 確保簽章驗證工具已安裝
+            state: present
+
+        - name: Get system architecture (dpkg style)
+          ansible.builtin.command: dpkg --print-architecture
+          register: dpkg_arch
+          changed_when: false
+
+        # --- 步驟 A: 設定 APT Keyring ---
+        - name: Download 1Password GPG key (ASCII)
+          ansible.builtin.get_url:
+            url: https://downloads.1password.com/linux/keys/1password.asc
+            dest: /tmp/1password.asc
+            mode: '0644'
+
+        - name: Dearmor 1Password GPG key for APT
+          ansible.builtin.command:
+            cmd: gpg --dearmor --yes -o /usr/share/keyrings/1password-archive-keyring.gpg /tmp/1password.asc
+          args:
+            creates: /usr/share/keyrings/1password-archive-keyring.gpg
+
+        # --- 步驟 B: 設定 APT Repository ---
+        - name: Add 1Password repository
+          ansible.builtin.apt_repository:
+            repo: "deb [arch={{ dpkg_arch.stdout }} signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/{{ dpkg_arch.stdout }} stable main"
+            filename: 1password
+            state: present
+
+        # --- 步驟 C: 設定 Debsig Policy (簽章驗證) ---
+        - name: Create Debsig policy directory
+          ansible.builtin.file:
+            path: /etc/debsig/policies/AC2D62742012EA22
+            state: directory
+            mode: '0755'
+
+        - name: Download 1Password Debsig Policy
+          ansible.builtin.get_url:
+            url: https://downloads.1password.com/linux/debian/debsig/1password.pol
+            dest: /etc/debsig/policies/AC2D62742012EA22/1password.pol
+            mode: '0644'
+
+        - name: Create Debsig keyring directory
+          ansible.builtin.file:
+            path: /usr/share/debsig/keyrings/AC2D62742012EA22
+            state: directory
+            mode: '0755'
+
+        - name: Dearmor 1Password GPG key for Debsig
+          ansible.builtin.command:
+            cmd: gpg --dearmor --yes -o /usr/share/debsig/keyrings/AC2D62742012EA22/debsig.gpg /tmp/1password.asc
+          args:
+            creates: /usr/share/debsig/keyrings/AC2D62742012EA22/debsig.gpg
+
+        # --- 步驟 D: 安裝 CLI ---
+        - name: Install 1Password CLI
+          ansible.builtin.apt:
+            name: 1password-cli
+            state: present
+            update_cache: true
+          
+        - name: Cleanup temporary key file
+          ansible.builtin.file:
+            path: /tmp/1password.asc
+            state: absent
+      when: op_check.rc != 0
+
+    # =======================================================
+    # 3. Install PBS Client - x86_64 (Official Repo)
+    # =======================================================
+    - name: Configure Official PBS Repo (x86_64)
+      block:
+        - name: Add Proxmox repository key
+          ansible.builtin.get_url:
+            url: "https://enterprise.proxmox.com/debian/proxmox-release-{{ ansible_distribution_release }}.gpg"
+            dest: /etc/apt/trusted.gpg.d/proxmox-release-{{ ansible_distribution_release }}.gpg
+            mode: '0644'
+
+        - name: Add Proxmox Client repository
+          ansible.builtin.apt_repository:
+            repo: "deb http://download.proxmox.com/debian/pbs-client {{ ansible_distribution_release }} main"
+            filename: pbs-client
+            state: present
+
+        - name: Install Proxmox Backup Client (APT)
+          ansible.builtin.apt:
+            name: proxmox-backup-client
+            state: present
+            update_cache: true
+      when: ansible_architecture == "x86_64" and pbs_check.rc != 0
+
+    # =======================================================
+    # 4. Install PBS Client - ARM/Raspberry Pi (Client Only)
+    # =======================================================
+    - name: Install PBS Client (ARM Specific)
+      block:
+        - name: Get dpkg architecture
+          ansible.builtin.command: dpkg --print-architecture
+          register: dpkg_arch
+          changed_when: false
+
+        - name: Create temporary install directory
+          ansible.builtin.file:
+            path: /tmp/pbs_client_install
+            state: directory
+            mode: '0755'
+
+        - name: Download PBS Client archive
+          ansible.builtin.get_url:
+            url: "https://github.com/ayufan/pve-backup-server-dockerfiles/releases/download/{{ pbs_client_version }}/proxmox-backup-client-{{ pbs_client_version }}-{{ dpkg_arch.stdout }}.tgz"
+            dest: "/tmp/pbs_client_install/client.tgz"
+            mode: '0644'
+
+        - name: Extract archive
+          ansible.builtin.unarchive:
+            src: "/tmp/pbs_client_install/client.tgz"
+            dest: "/tmp/pbs_client_install"
+            remote_src: true
+            # 關鍵技巧：去掉第一層目錄，直接把內容解壓到當前目錄
+            # 這樣腳本一定會在 /tmp/pbs_client_install/proxmox-backup-client.sh
+            extra_opts: [--strip-components=1]
+
+        - name: Install binary to /usr/local/bin
+          ansible.builtin.copy:
+            src: "/tmp/pbs_client_install/proxmox-backup-client"
+            dest: "/usr/local/bin/proxmox-backup-client"
+            mode: '0755'
+            owner: root
+            group: root
+            remote_src: true
+
+        - name: Cleanup temporary files
+          ansible.builtin.file:
+            path: /tmp/pbs_client_install
+            state: absent
+
+      when: ansible_architecture in ['aarch64', 'armv7l', 'arm64'] and pbs_check.rc != 0
+
+    # =======================================================
+    # 4. Deploy Backup Script & Cron
+    # =======================================================
+    - name: Deploy backup script
+      ansible.builtin.copy:
+        dest: "{{ backup_script_path }}"
+        mode: '0700'
+        owner: root
+        group: root
+        content: |
+          #!/bin/sh
+          export OP_CONNECT_HOST="{{ op_connect_host }}"
+          export OP_CONNECT_TOKEN="{{ op_connect_token }}"
+          export PBS_REPOSITORY="{{ pbs_repo }}"
+          export PBS_PASSWORD="{{ pbs_password_ref }}"
+          export PBS_FINGERPRINT="{{ pbs_fingerprint_ref }}"
+          export PBS_PXAR='root.pxar:/'
+
+          PBS_BINARY=$(which proxmox-backup-client)
+          if [ -z "$PBS_BINARY" ]; then
+            echo "Error: proxmox-backup-client not found"
+            exit 1
+          fi
+
+          exec op run -- "$PBS_BINARY" backup "$PBS_PXAR"
+
+    - name: Create PBS Backup Systemd Service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pbs-backup.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Proxmox Backup Client via 1Password
+          # 關鍵：確保網路通了才跑
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          # 指向我們之前部署的腳本
+          ExecStart={{ backup_script_path }}
+          User=root
+          # 可選：設定失敗後的行為
+          StandardOutput=journal
+          StandardError=journal
+
+    - name: Create PBS Backup Systemd Timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pbs-backup.timer
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Run PBS Backup daily at 2 AM
+
+          [Timer]
+          # 每天凌晨 02:00:00 執行
+          OnCalendar=*-*-* 02:00:00
+          # 關鍵：如果當時關機，開機後立即補跑
+          Persistent=true
+          # 隨機延遲 5 分鐘，避免所有機器同時備份衝擊 PBS Server
+          RandomizedDelaySec=300
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable and Start PBS Backup Timer
+      ansible.builtin.systemd:
+        name: pbs-backup.timer
+        state: started
+        enabled: true
+        daemon_reload: true
+
