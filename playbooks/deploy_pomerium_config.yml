@@ -1,0 +1,46 @@
+---
+- name: 部署並合併 Pomerium 設定
+  hosts: pomerium
+
+  pre_tasks:
+    - name: 🛑 檢查必要變數是否存在
+      ansible.builtin.assert:
+        that:
+          - pomerium_dir is defined
+          - pomerium_dir | length > 0  # 確保不是空字串
+        fail_msg: "❌ 錯誤：變數 'pomerium_dir' 未定義或為空！請檢查你的變數檔。"
+        success_msg: "✅ 變數檢查通過，開始部署..."
+  
+  tasks:
+    - name: 確保 Pomerium 設定檔目錄存在
+      ansible.builtin.file:
+        path: "{{ pomerium_dir }}"
+        state: directory
+        owner: heimdall
+        group: heimdall
+        mode: '0755'
+
+    - name: 自動載入 vars/pomerium_routes/ 下的所有路由設定檔
+      ansible.builtin.include_vars:
+        dir: vars/pomerium_routes
+        extensions:
+          - 'yml'
+          - 'yaml'
+        name: raw_route_files  # 將所有檔案內容打包進這個字典變數
+
+    - name: 生成最終的 Pomerium config.yaml
+      ansible.builtin.template:
+        src: templates/pomerium_config.yaml.j2
+        dest: "{{ pomerium_dir }}/config.yaml"
+        owner: heimdall
+        group: heimdall
+        mode: '0600'  # 設定檔包含機密資訊，權限設為 0600
+      #notify: 
+      #  - Restart Pomerium
+
+  handlers:
+    - name: Restart Pomerium
+      command: docker compose restart proxy
+      args:
+        chdir: "{{ pomerium_dir }}"
+

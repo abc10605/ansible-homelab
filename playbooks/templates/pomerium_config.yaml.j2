@@ -1,0 +1,19 @@
+# ==========================================
+# 此檔案由 Ansible 自動生成，請勿手動修改！
+# ==========================================
+
+# --- 基礎與認證設定 ---
+ssh_address: 0.0.0.0:22 # if port 22 is already in use by sshd, choose a different port
+ssh_user_ca_key_file: '/pomerium/ssh/pomerium_user_ca_key'
+ssh_host_key_files:
+  - '/pomerium/ssh/pomerium_ssh_host_ed25519_key'
+  - '/pomerium/ssh/pomerium_ssh_host_rsa_key'
+  - '/pomerium/ssh/pomerium_ssh_host_ecdsa_key'
+
+runtime_flags:
+  ssh_allow_direct_tcpip: true
+
+# --- 動態合併的路由設定 ---
+routes:
+{{ raw_route_files | dict2items | map(attribute='value') | flatten | to_nice_yaml(indent=2) | indent(2, True) }}
+

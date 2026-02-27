@@ -1,0 +1,103 @@
+---
+- name: Deploy Pomerium Proxy
+  hosts: pomerium
+
+  vars:
+    pomerium_version: "v0.32.0"
+    pomerium_image: "cr.pomerium.com/pomerium/pomerium:{{ pomerium_version }}"
+    docker_network: "pomerium-proxy"
+
+    cookie_secret: "{{ lookup('community.general.onepassword', 'Pomerium secrets', field='cookie_secret', vault='Connect Server') }}"
+    shared_secret: "{{ lookup('community.general.onepassword', 'Pomerium secrets', field='shared_secret', vault='Connect Server') }}"
+    idp_client_secret: "{{ lookup('community.general.onepassword', 'Pomerium secrets', field='idp_client_secret', vault='Connect Server') }}"
+    signing_key: "{{ lookup('community.general.onepassword', 'Pomerium secrets', field='signing_key', vault='Connect Server') }}"
+
+  tasks:
+    # ── 1. 確保工作目錄存在 ─────────────────────────────────────────────
+    - name: Ensure pomerium working directory exists
+      ansible.builtin.file:
+        path: "{{ pomerium_dir }}"
+        state: directory
+        mode: "0750"
+        owner: heimdall
+        group: heimdall
+
+    # ── 2. 確保 Docker network 存在 ─────────────────────────────────────
+    - name: Ensure Docker network '{{ docker_network }}' exists
+      community.docker.docker_network:
+        name: "{{ docker_network }}"
+        state: present
+
+    # ── 3. Pull 最新 image（冪等：只在 digest 變更時才 pull）─────────────
+    - name: Pull Pomerium image
+      community.docker.docker_image:
+        name: "{{ pomerium_image }}"
+        source: pull
+        force_source: false  # 設為 true 可強制每次更新
+
+    # ── 4. 啟動 Pomerium container ───────────────────────────────────────
+    - name: Deploy Pomerium proxy container
+      community.docker.docker_container:
+        name: pomerium_proxy
+        image: "{{ pomerium_image }}"
+        state: started
+        restart_policy: unless-stopped
+
+        # Ports
+        published_ports:
+          - "2222:22"
+          - "80:80"
+          - "443:443"
+
+        # Environment variables
+        env:
+          COOKIE_EXPIRE: "240h"
+          COOKIE_SECRET: "{{ cookie_secret }}"
+          AUTHENTICATE_SERVICE_URL: "https://authenticate.ztna.zaidho.me"
+          SHARED_SECRET: "{{ shared_secret }}"
+          IDP_PROVIDER: "oidc"
+          IDP_PROVIDER_URL: "https://zaidho-klbh4s.us1.zitadel.cloud"
+          IDP_SCOPES: "openid,profile,email"
+          IDP_CLIENT_ID: "358921235242964760"
+          IDP_CLIENT_SECRET: "{{ idp_client_secret }}"
+          JWT_CLAIMS_HEADERS: "email,user,name,family_name,given_name"
+          HTTP_REDIRECT_ADDR: ":80"
+          AUTOCERT: "true"
+          AUTOCERT_DIR: "/pomerium/certs"
+          AUTOCERT_EMAIL: "chenghsuanho@zaidho.me"
+          AUTOCERT_USE_STAGING: "false"
+          SIGNING_KEY: "{{ signing_key }}"
+
+        # Volumes
+        volumes:
+          - "{{ pomerium_dir }}:/pomerium"
+
+        # Networks
+        networks:
+          - name: "{{ docker_network }}"
+
+        # Capabilities
+        capabilities:
+          - NET_BIND_SERVICE
+
+        # 比較設定變更時自動重啟（冪等關鍵）
+        comparisons:
+          env: strict
+          volumes: strict
+          networks: strict
+          published_ports: strict
+
+      no_log: true  # 防止 secrets 出現在 log
+
+    # ── 5. 驗證 container 正在運行 ──────────────────────────────────────
+    - name: Verify Pomerium container is running
+      community.docker.docker_container_info:
+        name: pomerium_proxy
+      register: container_info
+
+    - name: Assert container is running
+      ansible.builtin.assert:
+        that:
+          - container_info.container.State.Running == true
+        fail_msg: "Pomerium container is NOT running!"
+        success_msg: "Pomerium container is running ✓"
